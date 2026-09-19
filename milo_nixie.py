@@ -3,6 +3,7 @@ import sys
 import math
 import random
 import pygame
+import pygame.scrap
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
@@ -56,10 +57,78 @@ def send_typed_message(text: str):
             sig_file = os.path.join(s_dir, ".typed_input")
             with open(sig_file, "w", encoding="utf-8") as f:
                 f.write(text.strip() + "\n")
+            # Immediate responsive visual feedback
+            state_file = os.path.join(s_dir, ".voice_state")
+            with open(state_file, "w") as sf:
+                sf.write("thinking")
             return True
         except Exception:
             pass
     return False
+
+
+# -----------------------------------------------------------------------------
+# System Clipboard Access (Tkinter / Pygame Scrap / CLI)
+# -----------------------------------------------------------------------------
+_tk_root = None
+
+
+def get_clipboard_text() -> str:
+    """Retrieve plain text from system clipboard using the best available backend."""
+    global _tk_root
+    # 1. Tkinter (fastest & most reliable on Linux X11, ~0.3ms)
+    try:
+        if _tk_root is None:
+            import tkinter as tk
+            _tk_root = tk.Tk()
+            _tk_root.withdraw()
+        text = _tk_root.clipboard_get()
+        if text:
+            return text
+    except Exception:
+        _tk_root = None
+
+    # 2. Pygame scrap
+    try:
+        if pygame.scrap.get_init():
+            for mime in ("text/plain;charset=utf-8", "UTF8_STRING", "TEXT"):
+                raw = pygame.scrap.get(mime)
+                if raw:
+                    return raw.decode("utf-8", errors="replace").rstrip("\x00")
+    except Exception:
+        pass
+
+    # 3. CLI fallbacks (xclip / xsel / wl-paste)
+    import subprocess
+    import shutil
+    for cmd in (
+        ["xclip", "-selection", "clipboard", "-o"],
+        ["xsel", "-b", "-o"],
+        ["wl-paste", "--no-newline"],
+    ):
+        if shutil.which(cmd[0]):
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=0.3)
+                if res.returncode == 0 and res.stdout:
+                    return res.stdout
+            except Exception:
+                pass
+    return ""
+
+
+def set_clipboard_text(text: str):
+    """Set system clipboard text."""
+    global _tk_root
+    try:
+        if _tk_root is None:
+            import tkinter as tk
+            _tk_root = tk.Tk()
+            _tk_root.withdraw()
+        _tk_root.clipboard_clear()
+        _tk_root.clipboard_append(text)
+        _tk_root.update()
+    except Exception:
+        _tk_root = None
 
 
 # -----------------------------------------------------------------------------
@@ -320,6 +389,10 @@ def main():
     os.environ["SDL_RENDER_SCALE_QUALITY"] = "1"
     pygame.init()
     pygame.font.init()
+    try:
+        pygame.scrap.init()
+    except Exception:
+        pass
 
     # Determine default scale factor based on screen height (e.g. 4K 3840x2160)
     display_info = pygame.display.Info()
@@ -449,9 +522,40 @@ def main():
                 running = False
             elif event.type == pygame.VIDEORESIZE:
                 screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 3:  # Right-click pastes clipboard text into input box
+                    clip = get_clipboard_text()
+                    if clip:
+                        clean = " ".join(clip.split())
+                        if clean:
+                            remaining = 1000 - len(input_text)
+                            if remaining > 0:
+                                input_text += clean[:remaining]
             elif event.type == pygame.KEYDOWN:
                 ctrl_pressed = bool(event.mod & pygame.KMOD_CTRL)
-                if event.key == pygame.K_ESCAPE:
+                shift_pressed = bool(event.mod & pygame.KMOD_SHIFT)
+
+                # Paste from clipboard (Ctrl+V or Shift+Insert)
+                if (ctrl_pressed and event.key == pygame.K_v) or (shift_pressed and event.key == pygame.K_INSERT):
+                    clip = get_clipboard_text()
+                    if clip:
+                        clean = " ".join(clip.split())
+                        if clean:
+                            remaining = 1000 - len(input_text)
+                            if remaining > 0:
+                                input_text += clean[:remaining]
+                # Copy current input text to clipboard (Ctrl+C)
+                elif ctrl_pressed and event.key == pygame.K_c:
+                    if input_text:
+                        set_clipboard_text(input_text)
+                # Clear entire input line (Ctrl+U)
+                elif ctrl_pressed and event.key == pygame.K_u:
+                    input_text = ""
+                # Delete previous word (Ctrl+Backspace or Ctrl+W)
+                elif ctrl_pressed and event.key in (pygame.K_BACKSPACE, pygame.K_w):
+                    parts = input_text.rstrip().rsplit(" ", 1)
+                    input_text = parts[0] if len(parts) > 1 else ""
+                elif event.key == pygame.K_ESCAPE:
                     running = False
                 elif ctrl_pressed and event.key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
                     scale_factor = round(min(3.0, scale_factor + 0.1), 2)
@@ -477,7 +581,7 @@ def main():
                 elif event.key == pygame.K_BACKSPACE:
                     input_text = input_text[:-1]
                 else:
-                    if not ctrl_pressed and len(input_text) < 100 and event.unicode and event.unicode.isprintable():
+                    if not ctrl_pressed and len(input_text) < 1000 and event.unicode and event.unicode.isprintable():
                         input_text += event.unicode
 
         # Query real-time voice state from backtalk signal bus
@@ -591,11 +695,11 @@ def main():
         # --- Footer Line (Recent Message or Shortcut Hints) ---
         footer_y = 748
         if last_sent_text:
-            display_msg = last_sent_text if len(last_sent_text) <= 42 else last_sent_text[:39] + "..."
-            last_surf = font_small.render(f"Sent: \"{display_msg}\" | [Right-Alt] Push-To-Talk | [Ctrl +/-] Zoom | [Esc] Exit", True, (160, 130, 85))
+            display_msg = last_sent_text if len(last_sent_text) <= 38 else last_sent_text[:35] + "..."
+            last_surf = font_small.render(f"Sent: \"{display_msg}\" | [Ctrl+V] Paste | [Right-Alt] Push-To-Talk | [Esc] Exit", True, (160, 130, 85))
             canvas.blit(last_surf, ((WIDTH - last_surf.get_width()) // 2, footer_y))
         else:
-            hint = font_small.render("[Enter] Send Message | [Right-Alt] Push-To-Talk | [Ctrl +/-] Zoom | [Esc] Exit", True, (140, 115, 80))
+            hint = font_small.render("[Enter] Send Message | [Ctrl+V] Paste | [Right-Alt] Push-To-Talk | [Ctrl +/-] Zoom | [Esc] Exit", True, (140, 115, 80))
             canvas.blit(hint, ((WIDTH - hint.get_width()) // 2, footer_y))
 
         # --- Smoothscale Virtual Canvas to Fill Window Completely ---
