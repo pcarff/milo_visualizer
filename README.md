@@ -93,3 +93,25 @@ cd /anzym/my-agent/milo_visualizer
 - **Text Input**: Type message and press `[Enter]` to dispatch to MILO.
 - **`[Right-Alt]`**: Push-To-Talk voice trigger.
 - **`[Esc]`**: Exit console.
+
+---
+
+## 6. Steampunk Optical Viewfinder HUD (`milo_viewfinder.py`)
+
+A dedicated high-resolution visual HUD window for MILO's optical eyes:
+- **Framework**: PyQt6 adhering to the Victorian Steampunk design system (dark walnut housing, weathered brass border, dome screw rivets).
+- **Optics Display**: High-resolution 1080p frame viewport with an amber targeting reticle (concentric rings, crosshairs, and corner alignment brackets).
+- **Telemetry Console**: Real-time readouts indicating optical sensor model (Logitech C925e / UVC), resolution, target filename, file size, and query context.
+- **Live Signal Bus Sync**: Watches `/dev/shm/signals/.camera_snap`. When MILO snaps a photo during voice conversation, the Viewfinder instantly pops to the front and presents the image.
+- **Interactive Controls**:
+  - `[ 📷 SNAP & INSPECT NOW ]`: Manually trigger a fresh hardware frame capture and diagnosis.
+  - `[ 📂 OPEN GALLERY ]`: Opens `/workspaces_nvme/milo_pic` in the file manager.
+  - `[ 🎯 TOGGLE RETICLE ]`: Show or hide targeting reticle overlays.
+
+### Running the Viewfinder HUD
+
+```bash
+# Launch standalone Viewfinder HUD
+python3 /anzym/my-agent/milo_visualizer/milo_viewfinder.py
+```
+
