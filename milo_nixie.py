@@ -381,6 +381,122 @@ class AnalogMeter:
 
 
 # -----------------------------------------------------------------------------
+# Token Status Plates (Claude / Gemini / AGY / MILO) in the side bays
+# -----------------------------------------------------------------------------
+TOKEN_CMD = os.path.join(os.path.dirname(BASE_DIR), "milo-tools", "milo-tokens")
+TOKEN_REFRESH_S = 60
+
+
+class TokenPoller:
+    """Runs milo-tokens in a background thread every minute; the draw loop
+    only ever reads the last parsed result."""
+
+    def __init__(self):
+        import threading
+        self.status = None
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        import json
+        import subprocess
+        import time
+        while True:
+            try:
+                res = subprocess.run([TOKEN_CMD, "--json"], capture_output=True, text=True, timeout=45)
+                if res.returncode == 0:
+                    self.status = json.loads(res.stdout)
+            except Exception:
+                pass
+            time.sleep(TOKEN_REFRESH_S)
+
+
+def _human(n):
+    n = n or 0
+    for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if n >= div:
+            return f"{n / div:.1f}{suf}".replace(".0", "")
+    return str(int(n))
+
+
+def token_plate_rows(status):
+    """-> {agent: (title, badge, big, detail, bar_pct or None)}"""
+    import time
+    rows = {}
+    if not status:
+        return rows
+    c = status.get("claude", {})
+    five = (c.get("plan") or {}).get("five_hour") or {}
+    week = (c.get("plan") or {}).get("seven_day") or {}
+    now = time.time()
+    # A limit window that has already reset makes the saved % stale.
+    five_pct = five.get("pct") if (five.get("resets_at") or 0) > now else None
+    week_pct = week.get("pct") if (week.get("resets_at") or 0) > now else None
+    rows["claude"] = ("CLAUDE", f"5H {five_pct:.0f}%" if five_pct is not None else "5H --",
+                      _human(c.get("today_total")),
+                      (f"WK {week_pct:.0f}% · " if week_pct is not None else "") + f"7D {_human(c.get('week_total'))}",
+                      five_pct)
+    g = status.get("gemini", {})
+    rows["gemini"] = ("GEMINI", "CLI", _human(g.get("today_total")),
+                      f"7D {_human(g.get('week_total'))}" + ("" if g.get("last_used") else " · IDLE"), None)
+    a = status.get("agy", {})
+    rows["agy"] = ("AGY", "ANTIGRAVITY", _human(a.get("today_total")),
+                   f"7D {_human(a.get('week_total'))}" + ("" if a.get("last_used") else " · IDLE"), None)
+    m = status.get("milo", {})
+    ctx = m.get("context") or {}
+    ctx_pct = 100.0 * ctx["used"] / ctx["max"] if ctx.get("max") else None
+    rows["milo"] = ("MILO", f"CTX {ctx_pct:.0f}%" if ctx_pct is not None else "OFFLINE",
+                    _human(m.get("today_total")),
+                    f"7D {_human(m.get('week_total'))} · {_human(ctx.get('used'))} CTX", ctx_pct)
+    return rows
+
+
+class TokenPlate:
+    W, H = 160, 62
+
+    def __init__(self, cx, y, agent, fonts):
+        self.rect = pygame.Rect(cx - self.W // 2, y, self.W, self.H)
+        self.agent = agent
+        self.f_title, self.f_big, self.f_tiny = fonts
+        self.bg = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
+        pygame.draw.rect(self.bg, (12, 9, 7, 225), self.bg.get_rect(), border_radius=5)
+
+    def draw(self, surface, row):
+        r = self.rect
+        surface.blit(self.bg, r.topleft)
+        pygame.draw.rect(surface, BRASS, r, width=1, border_radius=5)
+        for ix, iy in ((r.left + 4, r.top + 4), (r.right - 5, r.top + 4),
+                       (r.left + 4, r.bottom - 5), (r.right - 5, r.bottom - 5)):
+            pygame.draw.circle(surface, BRASS_DARK, (ix, iy), 2)
+
+        title, badge, big, detail, pct = row or (self.agent.upper(), "", "--", "awaiting telemetry", None)
+        surface.blit(self.f_title.render(title, True, BRASS_LIGHT), (r.left + 10, r.top + 4))
+        b = self.f_tiny.render(badge, True, MUTED_BRASS if pct is None else TEXT_COLOR)
+        surface.blit(b, (r.right - 10 - b.get_width(), r.top + 6))
+
+        # Today's total in Nixie amber with a soft glow
+        big_s = self.f_big.render(big, True, NIXIE_GLOW)
+        glow = self.f_big.render(big, True, (255, 110, 0))
+        glow.set_alpha(70)
+        bx = r.left + 10
+        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            surface.blit(glow, (bx + ox, r.top + 17 + oy))
+        surface.blit(big_s, (bx, r.top + 17))
+        today = self.f_tiny.render("TODAY", True, MUTED_BRASS)
+        surface.blit(today, (bx + big_s.get_width() + 6, r.top + 26))
+
+        surface.blit(self.f_tiny.render(detail, True, (200, 175, 120)), (r.left + 10, r.top + 40))
+
+        # Usage bar: amber, turning red past 80%
+        bar = pygame.Rect(r.left + 10, r.bottom - 9, r.width - 20, 4)
+        pygame.draw.rect(surface, (40, 30, 20), bar, border_radius=2)
+        if pct is not None:
+            fill = bar.copy()
+            fill.width = max(2, int(bar.width * min(pct, 100) / 100))
+            color = (230, 60, 40) if pct >= 80 else AMBER_GLOW
+            pygame.draw.rect(surface, color, fill, border_radius=2)
+
+
+# -----------------------------------------------------------------------------
 # Main Visualizer Loop
 # -----------------------------------------------------------------------------
 
@@ -499,6 +615,18 @@ def main():
     font_title = pygame.font.SysFont("monospace", 26, bold=True)
     font_input = pygame.font.SysFont("monospace", 15)
     font_small = pygame.font.SysFont("monospace", 12)
+
+    # 5. Token status plates in the side bays (above/below each meter)
+    plate_fonts = (pygame.font.SysFont("serif", 11, bold=True),
+                   pygame.font.SysFont("monospace", 18, bold=True),
+                   pygame.font.SysFont("monospace", 10, bold=True))
+    token_plates = [
+        TokenPlate(152, 294, "claude", plate_fonts),
+        TokenPlate(152, 508, "gemini", plate_fonts),
+        TokenPlate(658, 294, "agy", plate_fonts),
+        TokenPlate(658, 508, "milo", plate_fonts),
+    ]
+    token_poller = TokenPoller()
 
     # Pre-render Nameplate
     t_surf_sh = font_plate.render("M.I.L.O.", True, (180, 150, 80))
@@ -628,6 +756,11 @@ def main():
         meter_right.update(is_working, is_speaking)
         meter_left.draw(canvas)
         meter_right.draw(canvas)
+
+        # --- Token Status Plates ---
+        plate_rows = token_plate_rows(token_poller.status)
+        for plate in token_plates:
+            plate.draw(canvas, plate_rows.get(plate.agent))
 
         # --- Draw Centered Steampunk Clock (Porthole Bezel: 234px) ---
         clock_widget.draw(canvas)
